@@ -1,0 +1,381 @@
+---
+title: "IMDB - Movie Ratings. Text Analysis"
+author: "Rajiv"
+date: "26 November 2016"
+output: html_document
+---
+
+#STEP - 1: Data Collection for the Movie Reviews and Ratings
+
+Loading the *rvest* Package necessary to scrape the data from the web
+```{r webscraping package, include=FALSE}
+library(rvest)
+```
+
+We are Scraping the user reviews and ratings in the below code for the selected Movie.
+A sample of couple reviews are displayed.
+
+```{r Web scraping code, echo=TRUE}
+counts = c(0,10,20,30,40)
+reviews = NULL
+ratings = NULL
+
+for (j in counts){
+  
+  url1 = paste0("http://www.imdb.com/title/tt0454921/reviews?filter=love;filter=love;start=",j)
+  url2 = paste0("http://www.imdb.com/title/tt0454921/reviews?filter=hate;filter=hate;start=",j)
+  
+  page1 = read_html(url1)
+  page2 = read_html(url2)
+
+  reviews1 = html_text(html_nodes(page1,'#tn15content p'))
+  reviews2 = html_text(html_nodes(page2,'#tn15content p'))
+  
+  reviews.positive = setdiff(reviews1, c("*** This review may contain spoilers ***","Add another review"))
+  reviews.negative = setdiff(reviews2, c("*** This review may contain spoilers ***","Add another review"))
+  
+  reviews = c(reviews,reviews.positive,reviews.negative)
+  
+  ratings.positive = substr(html_attr(html_nodes(page1,'h2+ img'),name = 'alt'),0,2)
+  ratings.negative = substr(html_attr(html_nodes(page2,'h2+ img'),name = 'alt'),0,1)
+  
+  ratings = c(ratings,ratings.positive,ratings.negative)
+}
+reviews = gsub("\n",' ',reviews) #writeLines(reviews,'Game of Thrones IMDB reviews.txt')
+head(reviews,2)
+```
+
+#STEP - 2: Analysing the Data Collected
+Loading required packages for Text Analysis
+
+```{r packages for Text Analysis, include=FALSE}
+library(text2vec)
+library(data.table)
+library(stringr)
+library(tm)
+library(RWeka)
+library(tokenizers)
+library(slam)
+library(wordcloud)
+library(ggplot2)
+library(textir)
+library(igraph)
+library(qdap)
+```
+
+Loaded the required Packages: text2vec, data.table, stringr, tm, RWeka, tokenizers, slam, wordcloud, ggplot2
+
+Creating a Data Frame from the reviews and ratings of the data collected.
+In this DataFrame We create a column id for each user review, the actual user review column and the user rating column 
+
+```{r DataFrame of reviews and ratings}
+data = data.frame(id = 1:length(reviews),  # creating doc IDs if name is not given
+                  text = reviews, 
+                  stars = ratings,
+                  stringsAsFactors = F)
+```
+
+The structure and the data frame that we created is displayed below
+
+```{r structure of the data frame} 
+dim(data)   #head(data,2)
+```
+
+The default stopwords from the file given in the class is imported from the Git page.
+The stopwords from the "text mining (TM)" package are imported.
+Additional stop words that are necessary for determining actual context are deleted by creating a seperate variable.
+
+```{r stopwords}
+stpw1 = readLines('https://raw.githubusercontent.com/sudhir-voleti/basic-text-analysis-shinyapp/master/data/stopwords.txt')
+stpw2 = tm::stopwords('english') 
+stpw3 = c('movie','film','pursuit','happyness','happiness','chris','gartner', 'smith')
+comn  = unique(c(stpw1, stpw2,stpw3))        
+stopwords = unique(gsub("'"," ",comn)) 
+```
+
+A function used to format all the movie reviews data is defined here.
+
+```{r function to clean the corpus}
+text.clean = function(x)                    # text data
+{ #require("tm")
+    x  =  gsub("<.*?>", " ", x)               # regex for removing HTML tags
+    x  =  iconv(x, "latin1", "ASCII", sub="") # Keep only ASCII characters
+    x  =  gsub("[^[:alnum:]]", " ", x)        # keep only alpha numeric 
+    x  =  tolower(x)                          # convert to lower case characters
+    x  =  removeNumbers(x)                    # removing numbers
+    x  =  stripWhitespace(x)                  # removing white space
+    x  =  gsub("^\\s+|\\s+$", "", x)          # remove leading and trailing white space
+    return(x)
+}
+```
+
+Finaly a cleaned corpus without any special characters, Unicode characters, numbers etc.., along with the stopwords that were defined above removed from all the documents with the white spaces cleaned is returned.
+
+A sample of two reviews of the cleaned corpus is displayed.
+
+```{r cleanded corpus }
+x  = text.clean(data$text)
+x  =  removeWords(x,stopwords)
+x  =  stripWhitespace(x)
+head(x,2)
+```
+
+# STEP - 3: Create DTM using text2vec package
+
+We are first creating bigrams from the corpus and picking the bigrams that only apper atleaset a minimum of 5 times in the whole corpus. In the next step replacing these bigrams in our original corpus and then tokenizing with the Uni-Grams.
+
+From here we take all the word tokens and their frequencies and then create a DTM out of it. 
+The Output of the final DTM will be like, each token and it's frequency in the each document.
+
+The structure of the DTM and subset of word tokens and their document frequencies are displayed. 
+
+```{r creating and DTM Bi-Grams}
+tok_fun = word_tokenizer
+it_0 = itoken( x,tokenizer = tok_fun,ids = data$id,progressbar = F)
+vocab = create_vocabulary(it_0,ngram = c(2L, 2L))  #length(vocab); str(vocab) # view what vocab obj is like #head(vocab,5)
+pruned_vocab = prune_vocabulary(vocab,term_count_min = 5) # length(pruned_vocab);  str(pruned_vocab)
+vectorizer = vocab_vectorizer(pruned_vocab)
+dtm_0  = create_dtm(it_0, vectorizer) 
+#dim(dtm_0)
+# Sort bi-gram with decreasing order of freq
+tsum = as.matrix(t(rollup(dtm_0, 1, na.rm=TRUE, FUN = sum))) # find sum of freq for each term
+tsum = tsum[order(tsum, decreasing = T),]       # terms in decreasing order of freq
+#head(tsum,5)
+#tail(tsum,5)
+
+# Code bi-grams as unigram in clean text corpus
+text2 = x
+text2 = paste("",text2,"")
+pb <- txtProgressBar(min = 1, max = (length(tsum)), style = 3) ; i = 0
+for (term in names(tsum)){
+    i = i + 1
+    focal.term = gsub("_", " ",term)
+    replacement.term = term
+    text2 = gsub(paste("",focal.term,""),paste("",replacement.term,""), text2)
+    #setTxtProgressBar(pb, i)
+}
+it_m = itoken(text2,tokenizer = tok_fun,ids = data$id,progressbar = F)
+vocab = create_vocabulary(it_m) # length(vocab); str(vocab)     # view what vocab obj is like
+pruned_vocab = prune_vocabulary(vocab,term_count_min = 1)
+vectorizer = vocab_vectorizer(pruned_vocab)
+dtm_m  = create_dtm(it_m, vectorizer) #dim(dtm_m)
+dtm = as.DocumentTermMatrix(dtm_m, weighting = weightTf)
+a0 = (apply(dtm, 1, sum) > 0)   # build vector to identify non-empty docs
+dtm = dtm[a0,]                  # drop empty docs
+dim(dtm)
+# view a sample of the DTM, sorted from most to least frequent tokens 
+dtm = dtm[,order(apply(dtm, 2, sum), decreasing = T)]     # sorting dtm's columns in decreasing order of column sums
+inspect(dtm[1:5, 1:5])     # inspect() func used to view parts of a DTM object
+```
+
+**Plotting Word Cloud and Bar graph for a Term Frequency (TF) Matrix**
+
+```{r Build word cloud - Using TF, warning=FALSE}
+tst = round(ncol(dtm)/100)  # divide DTM's cols into 100 manageble parts
+a = rep(tst,99)
+b = cumsum(a);rm(a)
+b = c(0,b,ncol(dtm))
+ss.col = c(NULL)
+for (i in 1:(length(b)-1)) {
+    tempdtm = dtm[,min((b[i]+1),ncol(dtm)):min(b[i+1],ncol(dtm))]
+    s = colSums(as.matrix(tempdtm))
+    ss.col = c(ss.col,s)
+    #print(i)
+}
+tsum = ss.col
+tsum = tsum[order(tsum, decreasing = T)] #terms in decreasing order of freq
+#head(tsum)
+#tail(tsum)
+#names(tsum)
+#tsum
+#windows()
+wordcloud(names(tsum), tsum,scale = c(4, 0.5),1,max.words = 200,colors = brewer.pal(8, "Dark2"))
+title(sub = "Term Frequency - Wordcloud")
+test = as.data.frame(round(tsum[1:15],0)) 
+#windows()
+ggplot(test, aes(x = rownames(test), y = test)) + 
+geom_bar(stat = "identity", fill = "Blue") +
+geom_text(aes(label = test), vjust= -0.20) + 
+theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+ggtitle("Term Frequency - Bar Plot")
+```
+
+**Plotting Word Cloud and Bar Grapg Using a Term frequency inverse document frequency (tfidf)**
+```{r Using Term frequency inverse document frequency (tfidf), warning=FALSE}
+dtm.tfidf = tfidf(dtm, normalize=FALSE)
+tst = round(ncol(dtm.tfidf)/100)
+a = rep(tst, 99)
+b = cumsum(a);rm(a)
+b = c(0,b,ncol(dtm.tfidf))
+
+ss.col = c(NULL)
+for (i in 1:(length(b)-1)) {
+    tempdtm = dtm.tfidf[,min((b[i]+1),ncol(dtm.tfidf)):min((b[i+1]),ncol(dtm.tfidf))]
+    s = colSums(as.matrix(tempdtm))
+    ss.col = c(ss.col,s)
+    #print(i)
+}
+tsum = ss.col
+tsum = tsum[order(tsum, decreasing = T)]
+#head(tsum)
+#tail(tsum)
+#windows()
+wordcloud(names(tsum), tsum, scale=c(4,1),1, max.words=110,colors=brewer.pal(8, "Dark2"))
+title(sub = "Term Frequency Inverse Document Frequency - Wordcloud")
+#as.matrix(tsum[1:20])
+#(dtm.tfidf)[1:10, 1:10]
+test = as.data.frame(round(tsum[1:15],0))
+#windows()
+ggplot(test, aes(x = rownames(test), y = test)) + 
+    geom_bar(stat = "identity", fill = "red") +
+    geom_text(aes(label = test), vjust= -0.20) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    ggtitle("Term Frequency Inverse Document Frequency - Bar Plot")
+```
+
+
+**Creating a Term Co-Occurance Matrix (TCM) and Creating a COG**
+
+```{r Term Co-occurance Matrix (TCM) }
+vectorizer = vocab_vectorizer(pruned_vocab) #,grow_dtm = FALSE,skip_grams_window = 5L)
+tcm = create_tcm(it_m, vectorizer)
+tcm.mat = as.matrix(tcm)
+adj.mat = tcm.mat + t(tcm.mat)
+z = order(colSums(adj.mat), decreasing = T)
+adj.mat = adj.mat[z,z]
+adj = adj.mat[1:30,1:30]
+cog = graph.adjacency(adj, mode = 'undirected')
+#cog =  simplify(cog)  
+cog = delete.vertices(cog, V(cog)[ degree(cog) == 0 ])
+#windows()
+plot(cog)
+```
+
+**Distilled COG plots using an user defiend function for TF and TFIDF**
+
+```{r cleaned Distilled COG graph for Term Frequency, warning=FALSE}
+distill.cog = function(mat1,title,s,k1){   
+    a = colSums(mat1) 
+    b = order(-a)
+    mat2 = mat1[b, b]
+    diag(mat2) =  0
+    wc = NULL
+    for (i1 in 1:s){ 
+        thresh1 = mat2[i1,][order(-mat2[i1, ])[k1]]
+        mat2[i1, mat2[i1,] < thresh1] = 0   # neat. didn't need 2 use () in the subset here.
+        mat2[i1, mat2[i1,] > 0 ] = 1
+        word = names(mat2[i1, mat2[i1,] > 0])
+        mat2[(i1+1):nrow(mat2), match(word,colnames(mat2))] = 0
+        wc = c(wc,word)
+    } 
+    mat3 = mat2[match(wc, colnames(mat2)), match(wc, colnames(mat2))]
+    ord = colnames(mat2)[which(!is.na(match(colnames(mat2), colnames(mat3))))]  # removed any NAs from the list
+    mat4 = mat3[match(ord, colnames(mat3)), match(ord, colnames(mat3))]
+    graph <- graph.adjacency(mat4, mode = "undirected", weighted=T)    # Create Network object
+    graph = simplify(graph) 
+    V(graph)$color[1:s] = "green"
+    V(graph)$color[(s+1):length(V(graph))] = "pink"
+    graph = delete.vertices(graph, V(graph)[ degree(graph) == 0 ]) # delete singletons?
+    plot(graph,layout = layout.kamada.kawai,main = title)
+}
+#windows()
+distill.cog(tcm.mat, 'Term Frequency - Distilled COG',  10,  4)
+## adj.mat and distilled cog for tfidf DTMs ##
+adj.mat = t(dtm.tfidf) %*% dtm.tfidf
+diag(adj.mat) = 0
+a0 = order(apply(adj.mat, 2, sum), decreasing = T)
+adj.mat = as.matrix(adj.mat[a0[1:30], a0[1:30]])
+#windows()
+distill.cog(adj.mat, 'Term Frequency Document Inverse Ferquency Distilled COG',  10,  10)
+```
+
+## Step - 4: Compare corelation between review polarity score with its star rating
+```{r Compare each review polarity score with its star rating}
+pol = polarity(x)    
+pol_score =  pol$all$polarity
+data$stars = as.numeric(data$stars)
+cor(pol_score,data$stars)
+```
+
+The positive and Negative words that were talked about the movie are displayed in the below wordcloud.
+
+```{r things  that worked & not for the Movie}
+it_senti = itoken(x,tokenizer = tok_fun,ids = data$id,progressbar = F)
+vocab_senti = create_vocabulary(it_senti)
+pruned_vocab_senti = prune_vocabulary(vocab_senti,term_count_min = 1)
+vectorizer_senti = vocab_vectorizer(pruned_vocab_senti)
+dtm_senti  = create_dtm(it_senti, vectorizer_senti)
+#dim(dtm_m)
+dtm_1 = as.DocumentTermMatrix(dtm_senti, weighting = weightTf)
+a0 = (apply(dtm_1, 1, sum) > 0)   # build vector to identify non-empty docs
+dtm_1 = dtm_1[a0,]                  # drop empty docs
+positive_words = unique(setdiff(unlist(pol$all[,4]),"-"))  # Positive words list
+negative_words = unique(setdiff(unlist(pol$all[,5]),"-"))  # Negative words list
+```
+
+
+```{r list of few positive and negative words that were uuse in the movie}
+head(positive_words,15)
+head(negative_words,15)
+```
+
+**Wordclouds**
+```{r wordclouds of positive and negative sentiment, warning=FALSE}
+pos.tdm = dtm[,which(colnames(dtm) %in% positive_words)]
+m = as.matrix(pos.tdm)
+v = sort(colSums(m), decreasing = TRUE)
+windows() # opens new image window
+wordcloud(names(v), v, scale=c(4,2),1, max.words=100,colors=brewer.pal(8, "Dark2"))
+title(sub = "Positive Words - Wordcloud")
+
+neg.tdm = dtm[,which(colnames(dtm) %in% negative_words) ]
+m = as.matrix(neg.tdm)
+v = sort(colSums(m), decreasing = TRUE)
+windows()
+wordcloud(names(v), v, scale=c(4,2),1, max.words=100,colors=brewer.pal(8, "Dark2"))         
+title(sub = "Negative Words - Wordcloud")
+```
+
+Below is the over all sentiment score with a graph for the top 50 and bottom 50 reviews for the movie 
+```{r sentiment score and graph}
+#print("Average sentiment across the corpus") 
+#print(pol$group$ave.polarity)
+#print("with Standard Deviation")
+#print(pol$group$sd.polarity)
+pol$group
+```
+
+```{r pos vs neg sentiment plot}
+len = function(x){
+  if ( x == "-" && length(x) == 1)  {return (0)} 
+  else {return(length(unlist(x)))}
+}
+pcount = unlist(lapply(pol$all[,4], len))
+ncount = unlist(lapply(pol$all[,5], len))
+doc_id = seq(1:length(pol$all[,2]))
+windows()
+plot(doc_id,pcount,type="l",col="green",xlab = "Document ID", ylab= "Word Count")
+lines(doc_id,ncount,type= "l", col="red")
+title(main = "Positive words vs Negative Words" )
+legend("topright", inset=.05, c("Positive Words","Negative Words"), fill=c("green","red"), horiz=TRUE)
+```
+
+```{r Documet Sentiment Running plot}
+plot(pol$all$polarity, type = "l", ylab = "Polarity Score",xlab = "Document Number")
+abline(h=0)
+title(main = "Polarity Plot" )
+```
+
+
+# Step - 5: Recommendation based on the analysis.
+
+The movie that is considered here is *The Pursuit of Happyness*. This Movie was a based on real time story of a stock brocker, Chris Gartner, who faced several hurdles in his life's journey towards success. This movie was released in 2006, featuring *Will Smith* in the lead role and was directed by *Gabriele Muccino*. 
+
+Based on the sample of 100 user reviews from the IMDB website, and analysing them we can observe the below patterns and make the below recommendations for the studio. 
+
+The main topics that audience were talking about are the: *Story, Employment/Job condition, The Father and Son relation, struggles in the life, connection between money and happiness*  
+
+The overall sample's polarity score says that the movie has a positive impact based and most of viewers liked the movie. The corelation between the users ratings and the polarity score is 0.5, which means our analysis are cosiderably having strength.
+
+Many Viewers said that the movie was great, intresting, inspiring, brillant, amazing, recommended, enjoyed. But there are also few of them who said that the movie was sad, depressing, struggles, crying, boring, ridiculous, misery.  
+
